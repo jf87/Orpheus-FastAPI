@@ -52,6 +52,7 @@ from pydantic import BaseModel
 import json
 
 from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
+from tts_engine.cache import get_cache
 
 # Create FastAPI app
 app = FastAPI(
@@ -67,10 +68,15 @@ app = FastAPI(
 # Ensure directories exist
 os.makedirs("outputs", exist_ok=True)
 os.makedirs("static", exist_ok=True)
+os.makedirs("cache", exist_ok=True)
+
+# Initialize cache
+cache = get_cache()
 
 # Mount directories for serving files
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/cache", StaticFiles(directory="cache"), name="cache")
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
@@ -102,6 +108,27 @@ async def create_speech_api(request: SpeechRequest):
     if not request.input:
         raise HTTPException(status_code=400, detail="Missing input text")
     
+    # Get model name for cache key
+    model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf")
+    
+    # Check cache first
+    start = time.time()
+    cached_path = cache.get_cached_audio(request.input, request.voice, model_name)
+    
+    if cached_path:
+        end = time.time()
+        cache_retrieval_time = round(end - start, 3)
+        print(f"🎯 Cache hit! Retrieved {request.voice} audio in {cache_retrieval_time}s")
+        
+        # Return cached audio file
+        return FileResponse(
+            path=cached_path,
+            media_type="audio/wav",
+            filename=f"cached_{request.voice}_{int(time.time())}.wav"
+        )
+    
+    print(f"❌ Cache miss for {request.voice} - generating new audio...")
+    
     # Generate unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = f"outputs/{request.voice}_{timestamp}.wav"
@@ -112,7 +139,6 @@ async def create_speech_api(request: SpeechRequest):
         print(f"Using batched generation for long text ({len(request.input)} characters)")
     
     # Generate speech with automatic batching for long texts
-    start = time.time()
     generate_speech_from_api(
         prompt=request.input,
         voice=request.voice,
@@ -122,6 +148,14 @@ async def create_speech_api(request: SpeechRequest):
     )
     end = time.time()
     generation_time = round(end - start, 2)
+    print(f"✅ Generated {request.voice} audio in {generation_time}s")
+    
+    # Cache the generated audio (async to not delay response)
+    try:
+        cache.cache_audio(request.input, request.voice, model_name, output_path)
+        print(f"💾 Cached audio for future use")
+    except Exception as e:
+        print(f"⚠️  Failed to cache audio: {e}")
     
     # Return audio file
     return FileResponse(
@@ -156,6 +190,28 @@ async def speak(request: Request):
             content={"error": "Missing 'text'"}
         )
 
+    # Get model name for cache key
+    model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf")
+    
+    # Check cache first
+    start = time.time()
+    cached_path = cache.get_cached_audio(text, voice, model_name)
+    
+    if cached_path:
+        end = time.time()
+        cache_retrieval_time = round(end - start, 3)
+        print(f"🎯 Cache hit! Retrieved {voice} audio in {cache_retrieval_time}s")
+        
+        return JSONResponse(content={
+            "status": "ok",
+            "voice": voice,
+            "output_file": cached_path,
+            "generation_time": cache_retrieval_time,
+            "cached": True
+        })
+    
+    print(f"❌ Cache miss for {voice} - generating new audio...")
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = f"outputs/{voice}_{timestamp}.wav"
     
@@ -165,7 +221,6 @@ async def speak(request: Request):
         print(f"Using batched generation for long text ({len(text)} characters)")
     
     # Generate speech with batching for longer texts
-    start = time.time()
     generate_speech_from_api(
         prompt=text, 
         voice=voice, 
@@ -175,12 +230,21 @@ async def speak(request: Request):
     )
     end = time.time()
     generation_time = round(end - start, 2)
+    print(f"✅ Generated {voice} audio in {generation_time}s")
+    
+    # Cache the generated audio
+    try:
+        cache.cache_audio(text, voice, model_name, output_path)
+        print(f"💾 Cached audio for future use")
+    except Exception as e:
+        print(f"⚠️  Failed to cache audio: {e}")
 
     return JSONResponse(content={
         "status": "ok",
         "voice": voice,
         "output_file": output_path,
-        "generation_time": generation_time
+        "generation_time": generation_time,
+        "cached": False
     })
 
 # Web UI routes
@@ -265,6 +329,45 @@ async def restart_server():
     
     # Return success response
     return JSONResponse(content={"status": "ok", "message": "Server is restarting. Please wait a moment..."})
+
+# Cache Management Endpoints
+@app.get("/cache/stats")
+async def get_cache_stats():
+    """Get cache statistics"""
+    try:
+        stats = cache.get_cache_stats()
+        return JSONResponse(content={"status": "success", "cache_stats": stats})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Clear all cache entries"""
+    try:
+        success = cache.clear_cache()
+        if success:
+            return JSONResponse(content={"status": "success", "message": "Cache cleared successfully"})
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear cache")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+
+@app.get("/cache/check")
+async def check_cache(text: str, voice: str, model: str = "orpheus"):
+    """Check if a specific text/voice combination is cached"""
+    try:
+        # Get model name from environment
+        model_name = os.environ.get("ORPHEUS_MODEL_NAME", "Orpheus-3b-FT-Q8_0.gguf")
+        cached_path = cache.get_cached_audio(text, voice, model_name)
+        
+        is_cached = cached_path is not None
+        return JSONResponse(content={
+            "status": "success", 
+            "is_cached": is_cached,
+            "cache_key": cache._generate_cache_key(text, voice, model_name) if is_cached else None
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check cache: {str(e)}")
 
 def get_current_config():
     """Read current configuration from .env.example and .env files"""

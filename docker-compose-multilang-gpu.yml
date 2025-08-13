@@ -1,0 +1,217 @@
+services:
+  # English TTS Service
+  orpheus-fastapi-en:
+    container_name: orpheus-fastapi-en
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "5005:5005"
+    env_file:
+      - .env
+    environment:
+      - ORPHEUS_API_URL=http://llama-cpp-server-en:5006/v1/completions
+      - ORPHEUS_MODEL_NAME=Orpheus-3b-FT-Q8_0.gguf
+      - ORPHEUS_PORT=5005
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      llama-cpp-server-en:
+        condition: service_started
+
+  # German TTS Service  
+  orpheus-fastapi-de:
+    container_name: orpheus-fastapi-de
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "5006:5005"
+    env_file:
+      - .env
+    environment:
+      - ORPHEUS_API_URL=http://llama-cpp-server-de:5007/v1/completions
+      - ORPHEUS_MODEL_NAME=Orpheus-3b-German-FT-Q8_0.gguf
+      - ORPHEUS_PORT=5005
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      llama-cpp-server-de:
+        condition: service_started
+
+  # Spanish TTS Service
+  orpheus-fastapi-es:
+    container_name: orpheus-fastapi-es
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "5007:5005"
+    env_file:
+      - .env
+    environment:
+      - ORPHEUS_API_URL=http://llama-cpp-server-es:5008/v1/completions
+      - ORPHEUS_MODEL_NAME=Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf
+      - ORPHEUS_PORT=5005
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      llama-cpp-server-es:
+        condition: service_started
+
+  # English LLM Server
+  llama-cpp-server-en:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-cpp-server-en
+    ports:
+      - "5106:5006"
+    volumes:
+      - ./models:/models
+    env_file:
+      - .env
+    depends_on:
+      model-init-en:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: >
+      -m /models/Orpheus-3b-FT-Q8_0.gguf
+      --port 5006 
+      --host 0.0.0.0 
+      --n-gpu-layers 29
+      --ctx-size ${ORPHEUS_MAX_TOKENS}
+      --n-predict ${ORPHEUS_MAX_TOKENS}
+      --rope-scaling linear
+
+  # German LLM Server
+  llama-cpp-server-de:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-cpp-server-de
+    ports:
+      - "5107:5007"
+    volumes:
+      - ./models:/models
+    env_file:
+      - .env
+    depends_on:
+      model-init-de:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: >
+      -m /models/Orpheus-3b-German-FT-Q8_0.gguf
+      --port 5007 
+      --host 0.0.0.0 
+      --n-gpu-layers 29
+      --ctx-size ${ORPHEUS_MAX_TOKENS}
+      --n-predict ${ORPHEUS_MAX_TOKENS}
+      --rope-scaling linear
+
+  # Spanish LLM Server
+  llama-cpp-server-es:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-cpp-server-es
+    ports:
+      - "5108:5008"
+    volumes:
+      - ./models:/models
+    env_file:
+      - .env
+    depends_on:
+      model-init-es:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: >
+      -m /models/Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf
+      --port 5008 
+      --host 0.0.0.0 
+      --n-gpu-layers 29
+      --ctx-size ${ORPHEUS_MAX_TOKENS}
+      --n-predict ${ORPHEUS_MAX_TOKENS}
+      --rope-scaling linear
+
+  # Model downloaders
+  model-init-en:
+    image: curlimages/curl:latest
+    user: ${UID}:${GID}
+    volumes:
+      - ./models:/app/models
+    working_dir: /app
+    command: >
+      sh -c '
+      if [ ! -f /app/models/Orpheus-3b-FT-Q8_0.gguf ]; then
+        echo "Downloading English model..."
+        wget -P /app/models https://huggingface.co/lex-au/Orpheus-3b-FT-Q8_0.gguf/resolve/main/Orpheus-3b-FT-Q8_0.gguf
+      else
+        echo "English model already exists"
+      fi'
+    restart: "no"
+
+  model-init-de:
+    image: curlimages/curl:latest
+    user: ${UID}:${GID}
+    volumes:
+      - ./models:/app/models
+    working_dir: /app
+    command: >
+      sh -c '
+      if [ ! -f /app/models/Orpheus-3b-German-FT-Q8_0.gguf ]; then
+        echo "Downloading German model..."
+        wget -P /app/models https://huggingface.co/lex-au/Orpheus-3b-German-FT-Q8_0.gguf/resolve/main/Orpheus-3b-German-FT-Q8_0.gguf
+      else
+        echo "German model already exists"
+      fi'
+    restart: "no"
+
+  model-init-es:
+    image: curlimages/curl:latest
+    user: ${UID}:${GID}
+    volumes:
+      - ./models:/app/models
+    working_dir: /app
+    command: >
+      sh -c '
+      if [ ! -f /app/models/Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf ]; then
+        echo "Downloading Spanish model..."
+        wget -P /app/models https://huggingface.co/lex-au/Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf/resolve/main/Orpheus-3b-Italian_Spanish-FT-Q8_0.gguf
+      else
+        echo "Spanish model already exists"
+      fi'
+    restart: "no"
